@@ -1,0 +1,527 @@
+---
+title: "ELection Violence Intelligence System (ELVIS)"
+output: 
+  flexdashboard::flex_dashboard:
+    vertical_layout: scroll
+    theme: bootstrap
+    social: menu
+    runtime: shin
+    
+---
+
+```{r include = FALSE}
+library(ggplot2)
+library(ggmap)
+library(knitr)
+library(DT)
+library(magrittr)
+library(flexdashboard)
+library(caret)
+library(pdp)
+library(randomForest)
+library(bsselectR)
+library(htmlwidgets)
+library(pROC)
+```
+
+```{r echo = FALSE}
+#setup data and measures
+df1 <- read.csv("annual_risk_table.csv")
+df2 <- read.csv("update_risk_table.csv")
+df3 <- read.csv("elvis_master_dec2018.csv")
+imp_df <- read.csv("imp_df.csv")
+
+#keep original data for guages
+df1_gauge <- df1
+df2_gauage <- df2
+
+#keep original data for dynamic AUC scores
+df1_test <- df1
+
+#make diff between monthly update and annual risk
+df1$dates <- as.Date(df1$dates)
+df1 <- df1[order(df1$dates), ]
+df11 <- df1[df1$dates > Sys.Date(), ]
+
+df2$diff <- df2$prediction - df11$prediction
+
+#monthly update table
+df2 <- df2[, c("country", "dates", "prediction", "diff", "p_rank")]
+#df2$prediction <- df2$prediction*100
+df2 <- df2[order(df2$p_rank, decreasing = TRUE), ]
+df2 <- df2[!duplicated(df2), ]
+colnames(df2) <- c("Country", "Election Date", "Probability of Violence", "Risk Change since January", "Percentile")
+
+#annual risk table
+df1 <- df1[, c("country", "dates", "prediction", "p_rank", "elecViolence1")]
+#df1$prediction <- df1$prediction*100
+df1 <- df1[!duplicated(df1), ]
+colnames(df1) <- c("Country", "Election Date", "Probability of Violence", "Percentile", "Outcome")
+
+
+```
+
+Sidebar {.sidebar data-width=200}
+=======================================================================
+
+For more information about ELVIS, One Earth Future, our data, and methodology, please see the [introduction](#introduction). 
+
+---
+
+For the latest forecasts as of **`r Sys.time()`**, please see our [monthly risk tables](#elections). We also host a historical archive of elections [here](#historical-data-archive)
+
+---
+
+For additional substantive insight into our models, please check out our [historical accuracy](#accuracy), our measurements of [predictor importance](#variable-importance), and our measurements of [predictor relationships](#variable-relationships)
+
+
+Introduction {data-icon="fa-comment-o"}
+=======================================================================
+
+Column {data-width=550}
+-----------------------------------------------------------------------
+
+### What is ELVIS?
+
+The ELection Violence Intelligence System (ELVIS) is an early warning approach to predicting the risk of election violence for every major national election across the globe. ELVIS provides regularly updated forecasts for each election in the coming month, alongside an annual risk table and an archived risk table that dates back to 2000. We utilize an ensemble machine learning ecosystem to produce (1) predictions, (2) predictor importance measurements, (3) prediction/outcome relationship visualizations, and (4) evaluations of predictive accuracy.
+
+ELVIS was developed at the [One Earth Future Foundation](https://oneearthfuture.org/) under the [research department](https://oefresearch.org/) with the intent of providing both **substantive** and **actionable** information about the risk of election violence for upcoming elections.  
+
+### Election Violence Trends {.no-title}
+
+```{r fig.width = 9, fig.height = 5}
+
+neldc <- na.omit(df3)
+year <- 1975:2018
+neldy <- as.data.frame(year)
+neldy2 <- neldy
+ev1_freq <- NA
+yeari = 1975
+for(i in 1:44){
+  neldc2 <- neldc[neldc$year==yeari, ]
+  props1 <- summary(neldc2$elecViolence1)
+  ev1_freq[i] <- props1[[2]]/sum(props1[[2]],props1[[1]])
+  yeari = yeari + 1
+}
+neldy$ev <- ev1_freq
+
+ev2_freq <- NA
+yeari = 1975
+for(i in 1:44){
+  neldc2 <- neldc[neldc$year==yeari, ]
+  props2 <- summary(neldc2$elecViolence2)
+  ev2_freq[i] <- props2[[2]]/sum(props2[[2]],props2[[1]])
+  yeari = yeari + 1
+}
+neldy2$ev <- ev2_freq
+
+neldy$type = "ev1"
+neldy2$type = "ev2"
+neldy <- rbind(neldy, neldy2)
+
+
+ev1_plot <- ggplot(neldy) +
+  geom_smooth(mapping = aes(x = year, y = ev, color = type), method = "loess") +
+  scale_color_manual(values = c("ev1" = "#358bcb", "ev2" = "#7c731a"), labels = c("General Violence", "Government Violence")) +
+  xlab("Year") + ylab("Proportional Frequency of Election Violence") +
+  ggtitle("Election Violence Trends: January 1975 - October 2018") +
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.title=element_blank()) 
+ev1_plot
+
+```
+
+Column {data-width=450}
+-----------------------------------------------------------------------
+
+### How we make predictions.
+
+Like our [CoupCast](https://oefresearch.org/activities/coup-cast) project, we utilize original data alongside ensemble machine learning to forecast the risk of election violence. As a result, ELVIS contains three major components: 
+
+* **Data**: We continue the use of coding rules used by the [National Elections Across Democracy and Autocracy (NELDA)](https://nelda.co/) dataset to code relevant national elections each year. NELDA stopped coding election events ending in 2012, so we have expanded the data into the end of 2019. We code *general election violence* and *government harassment/violence* using the same rules as NELDA, and continue to code these outcomes for each new election event. Our predictor variables come from a combination of environmental, economic, social, and political measures that are found in our [Rulers, Elections, and Irregular Governance (REIGN)](https://oefdatascience.github.io/REIGN.github.io/) dataset. 
+
+* **Modeling**: We use a combination of methods to produce more accurate predictions of election violence. First, we start by implementing a [rolling origin cross validation](https://robjhyndman.com/hyndsight/tscv/) procedure for training our algorithm by taking into account temporal sequence. This allows us to avoid training on future data. Second, we use an ensemble of three classification algorithms. To do this, we use a greedy optimization procedure on top of a (1) random forest, (2) logistic regression, and (3) a neural network. 
+
+* **Insight**: Using the above, we provide four distinct insights into election violence. 
+    + **Predictions**: We provide an annual list of election violence risk at the beginning of each year. As elections happen, we update                    our predictions each month with both new outcomes and new social/economic data as it is released.  
+    + **Variable Importance**: Based off the most up-to-date training data, we also provide estimates of predictor importance as they relate to the         accurate classification of election violence. 
+    + **Variable Relationships**: We use partial dependence functions to visualize the relationship between our predictors and the risk of election         violence.
+    + **Accuracy**: We provide information on how well our system performs over the year and how it has performed historically. 
+    
+### Data Source and Citation.
+
+You can download our monthly updated training data for ELVIS [here](). (**UPDATED DECEMBER 1ST 2018**)
+
+If you wish you use the ELVIS data for your own projects, we recommend the following citation: 
+
+* **Citation TBD**
+
+If you are citing ELVIS, we also encourage the citation of the following data as well:
+
+* Susan D. Hyde and Nikolay Marinov, 2012, Which Elections Can Be Lost?, Political Analysis, 20(2), 191-201.
+
+* Bell, Curtis. 2016. The Rulers, Elections, and Irregular Governance Dataset (REIGN). Broomfield, CO: OEF Research. Available at oefresearch.org
+
+For any questions concerning ELVIS, our modeling, or data, please contact Clayton Besaw (cbesaw@oneearthfuture.org)
+
+
+2018 Elections {data-navmenu="Election Violence Forecasts"}
+=======================================================================
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Data Table Information
+
+For each year, we supply both an annual risk table that is updated at the beginning of the year (**2018 ANNUAL RISK TABLE**) and a monthly updated risk table for remaining elections (**REMAINING 2018 NATIONAL ELECTIONS**). Below we provide a brief description of each variable displayed, but feel free to contact Clayton Besaw (cbesaw@oneearthfuture.org) with any additional questions. 
+
+* **Country**: Country in which the election event is taking place. 
+
+* **Election Date**: Date that election event is set to take place in month/day/year format. This information is likely to change as election dates are often volatile or delayed. 
+
+* **Probability of Violence**: Predicted probability of general election-related violence before/during/after an election event. 
+  + For annual risk table, this is the base-line prediction based on only the historic training data. For the monthly risk table, this is the     updated prediction for each election event based on historic data and new events.
+  
+* **Percentile**: The percentile ranking for each election event based on the complete distribution of election violence forecasts. 
+
+* **Risk Change since January**: This is the change in the probability of election-related violence between the monthly updates and the base-line forecasts made at the beginning of the year (monthly risk table only). 
+
+* **Outcome**: Dichotomous classification of whether an election event was peaceful or experienced election-related violence before/during/after the event. Updated as election events are completed (annual risk table only). 
+
+### 2018 Elections Completed (As of October 2018)
+
+```{r}
+rate <- ((nrow(df1) - nrow(df2)) / nrow(df1))*100
+gauge(rate, min = 0, max = 100, symbol = '%', gaugeSectors(
+  success = c(80, 100), warning = c(40, 79), danger = c(0, 39)
+))
+
+```
+
+### 2018 Predictive Accuracy (As of December 2018)
+
+```{r}
+df1_gauge$vio3 <- as.factor(ifelse(df1_gauge$prediction >= .51, "vio", "peace"))
+classerror <- mean(df1_gauge$elecViolence1 != df1_gauge$vio3, na.rm = TRUE)
+acc <- round((1 - classerror)*100, digits = 0)
+gauge(acc, min = 0, max = 100, symbol = '%', gaugeSectors(
+  success = c(80, 100), warning = c(40, 79), danger = c(0, 39)
+))
+
+
+```
+
+### Proportion of Violent Elections in 2018 (As of December 2018)
+
+```{r}
+vio_prop <- round((summary(df1_gauge$elecViolence1)[[2]] / nrow(df1_gauge))*100, 
+                  digits = 0)
+gauge(vio_prop, min = 0, max = 100, symbol = '%', gaugeSectors(
+  success = c(0, 40), warning = c(41, 60), danger = c(60, 100)
+))
+
+```
+
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Remaining 2018 National Elections (UPDATED DECEMBER 2018)
+
+```{r echo = FALSE}
+
+DT::datatable(df2, rownames = FALSE) %>%
+  formatPercentage("Probability of Violence", 2) %>%
+  formatRound("Percentile", 2) %>%
+  formatDate("Election Date", "toLocaleDateString") %>%
+  formatPercentage("Risk Change since January", 2) %>%
+  formatStyle('Probability of Violence', 'text-align' = 'center') %>%
+  formatStyle('Risk Change since January', 'text-align' = 'center') %>%
+  formatStyle('Percentile', 'text-align' = 'center')
+
+```
+
+### 2018 ANNUAL RISK TABLE (UPDATED JANUARY 2018)
+
+```{r echo = FALSE}
+
+DT::datatable(df1, rownames = FALSE) %>%
+  formatPercentage("Probability of Violence", 2) %>%
+  formatRound("Percentile", 2) %>%
+  formatDate("Election Date", "toLocaleDateString") %>%
+  formatStyle(
+    'Outcome',
+    backgroundColor = styleEqual(
+      unique(df1$Outcome), c('lightblue', 'red', 'white')
+    )
+  ) %>%
+  formatStyle('Probability of Violence', 'text-align' = 'center') %>%
+  formatStyle('Outcome', 'text-align' = 'center') %>%
+  formatStyle('Percentile', 'text-align' = 'center')
+
+```
+
+
+Historical Data Archive {data-navmenu="Election Violence Forecasts"}
+=======================================================================
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Data Table Information
+
+This archive provides information on over two thousand unique national election events regarding their dates and whether election-related violence occured before/during/after the event. You can use the search box to look up specific countries, and the columns can be used to sort each variable according to their measurement type. If you wish to have access to the full training data, which includes this information, you can download it [here](). 
+
+* **Country**: Country in which the election event is taking place. 
+
+* **Election Date**: Date that election event is set to take place in month/day/year format. This information is likely to change as election dates are often volatile or delayed. 
+
+* **Outcome**: Dichotomous classification of whether an election event was peaceful or experienced election-related violence before/during/after the event. Updated as election events are completed.
+
+### Proportion of Violent Elections (1975 - 2018)
+
+```{r}
+vio_prop2 <- round((summary(df3$elecViolence1)[[2]] / nrow(df3))*100, 
+                  digits = 0)
+gauge(vio_prop2, min = 0, max = 100, symbol = '%', gaugeSectors(
+  success = c(0, 20), warning = c(41, 60), danger = c(60, 100)
+))
+
+```
+  
+
+
+
+Column {data-width=650}
+-----------------------------------------------------------------------
+
+### Election Information and Violence Outcomes (1975 - 2018)
+
+
+```{r echo = FALSE}
+
+df32 <- df3[ , c("country", "dates", "elecViolence1")]
+df32 <- df32[!duplicated(df32), ]
+df32$dates <- as.Date(df32$dates, format = "%m/%d/%Y")
+df32 <- df32[order(df32$dates, decreasing = FALSE), ]
+colnames(df32) <- c("Country", "Election Date", "Outcome")
+
+
+
+DT::datatable(df32, rownames = FALSE) %>%
+  formatDate("Election Date", "toLocaleDateString") %>%
+  formatStyle(
+    'Outcome',
+    backgroundColor = styleEqual(
+      unique(df32$Outcome), c('lightblue', 'red', 'white')
+    )
+  ) %>%
+  formatStyle('Outcome', 'text-align' = 'center')
+
+```
+
+
+Accuracy {data-navmenu="Model Insights"}
+=======================================================================
+
+Column {data-width = 150}
+-----------------------------------------------------------------------
+```{r echo = FALSE}
+df_acc <- read.csv("accuracy_data.csv", header = TRUE)
+
+
+auc_score_1 <- roc(df1_test$elecViolence1, df1_test$prediction, probability = TRUE)
+classerror_1 <- mean(df1_test$elecViolence1 != df1_test$vio2, na.rm = TRUE)
+acc_1 <- round((1 - classerror)*100, digits = 0)
+
+
+```
+
+### How do we measure accuracy?
+
+Because our system tires to classify the likelihood of election violence occuring, we use measurement of accuracy called the area under the curve [(AUC)](http://gim.unmc.edu/dxtests/roc3.htm) score. AUC scores range from .5 (random guessing) to 1 (percent accuracy), and can be interpreted using the following heuristic. 
+
+- .91 - 1 (**Excellent Accuracy**)
+- .81 - .90 (**Good Accuracy**)
+- .71 - .80 (**Fair/Acceptable Accuracy**)
+- .61 - .70 (**Poor Accuracy**)
+- .50 - .60 (**Almost Randomly Guessing**)
+
+Using rolling origin cross-validation, on historical data (1975 - 2017), we obtained an average AUC score of `r round(mean(df_acc$roc), 2)` corresponding to an average accuracy of `r (round(mean(df_acc$acc), 2))*100` percent of elections correctly classified. The figures to the right display the change in AUC scores for out-of-sample data into 2017. As expected, the inclusion of more data over time has resulted in impressive AUC scores (`r round(df_acc$roc[df_acc$year==2016], 2)` in 2016 and `r round(df_acc$roc[df_acc$year==2017], 2)` in 2017) for recent election years. Overall, our model has a good track record on historical data and suggests an actionable level of accuracy for each new slate of national elections. 
+
+As of October 26th, 2018, our model has achieved an AUC score of `r round(auc_score_1$auc[1], 2)` corresponding to an accuracy of `r acc_1` percent. 
+
+
+
+Column {data-width = 750}
+-----------------------------------------------------------------------
+
+### Model Accuracy on Historical Out-of-Sample Years (1975 - 2017)
+```{r }
+
+time_roc2 <- ggplot(df_acc, aes(x = years, y = roc)) + geom_line(stat = "identity") + labs(x = "Out-of-Sample Year", y = "Area Under the Curve Score")
+
+time_roc <- ggplot(df_acc, aes(x = years, y = roc)) + geom_smooth() + labs(x = "Out-of-Sample Year", y = "Area Under the Curve Score")
+
+par(mfrow=c(1, 2))
+time_roc2
+time_roc
+
+```
+
+
+Variable Importance {data-navmenu="Model Insights"}
+=======================================================================
+
+
+Column {data-width=350}
+-----------------------------------------------------------------------
+
+### Variable Descriptions
+
+The bar-plots to the right display the variable importance for each predictor included in our model. Variable importance is an estimate of how much each individual variable contributes to **predictive accuracy**. This is achieved by running multiple permutations of our forecasting models in which every variable is replaced with **random noise**. If accuracy decreases when a variable is replaced, then that variable is deemed more important for predictive accuracy. Our greedy ensemble classifier allows us to utilize the idiosyncratic nature of individual classifiers to built an overall measure of predictor importance. Each predictor is briefly described below:
+
+* **History of Election Violence**: This predictor is created by calculating the first principle component (linear combination) of three factors:
+  - **(a)**: Did election-related violence take place in the previous election event?
+  - **(b)**: How many election events since the last instance of election-related violence?
+  - **(c)**: How much election-related violence has been experienced previously by a country?
+
+* **GDP per Capita**: Measurement of GDP per Capita for the country-year of the election event.
+
+* **Population**: Logged measure of population for the country-year of the election event.
+
+* **Infant Mortality Rate**: Logged measure of infant mortality rate for the country-year of the election event.
+
+* **Coup Risk**: Estimated risk of a military coup in the month of the election. Taken from [REIGN]().
+
+* **Quality of Democracy**: Measure of high quality democracy (10) or low quality/authoritarian (-10) for the country-year of the election event. Taken from [Polity IV](). 
+
+* **Economic Growth**: Percent growth/decline in GDP for the country-year of the election event.
+
+* **Relative Precipitation**: Estimated relative level (SPI) of rain-fall in the month of the election. Base data taken from [NOAA's PRECipitation REConstruction over Land (PREC/L) data](https://www.esrl.noaa.gov/psd/data/gridded/data.precl.html).
+
+* **Regime Tenure**: Number of months a regime has been in power during the month of an election. Taken from [REIGN](). 
+
+* **Political Competition**: Level of political competition for the country-year of the election event. Taken from [Polity IV](). 
+
+* **Executive Constraints**: Level of constraints on the political executive for the country-year of the election event. Taken from [Polity IV]().
+
+* **Time Since Last Election**: Number of months since the last successful election during the month of an election. Taken from [REIGN]().
+
+* **Election in Next Six Months**: Dichotomous measure of whether another election is expected within six-months of an election event. Taken from [REIGN](). 
+
+
+
+Column {.tabset .tabset-fade}
+-----------------------------------------------------------------------
+
+### Greedy Ensemble Classifier (Overall Importance)
+
+```{r }
+imp_df21 <- transform(imp_df, variable = reorder(variable, overall))
+theme_set(theme_bw())
+imp_plot <- ggplot(imp_df21, aes(x = variable, y = overall)) + geom_bar(stat = "identity") + coord_flip()
+imp_plot + labs(y = "Importance for Predictive Accuracy (Greedy Ensemble)", x = "Variable")
+
+```
+
+### Random Forest Classifier
+
+```{r }
+
+imp_df22 <- transform(imp_df, variable = reorder(variable, rf))
+theme_set(theme_bw())
+imp_plot <- ggplot(imp_df22, aes(x = variable, y = rf)) + geom_bar(stat = "identity") + coord_flip()
+imp_plot + labs(y = "Importance for Predictive Accuracy (Random Forest)", x = "Variable")
+
+```
+
+### Neural Net Classifier
+
+```{r }
+
+imp_df23 <- transform(imp_df, variable = reorder(variable, nnet))
+theme_set(theme_bw())
+imp_plot <- ggplot(imp_df23, aes(x = variable, y = nnet)) + geom_bar(stat = "identity") + coord_flip()
+imp_plot + labs(y = "Importance for Predictive Accuracy (Neural Net)", x = "Variable")
+
+```
+
+### Logistic Regression Classifier
+
+```{r }
+
+imp_df24 <- transform(imp_df, variable = reorder(variable, logit))
+theme_set(theme_bw())
+imp_plot <- ggplot(imp_df24, aes(x = variable, y = logit)) + geom_bar(stat = "identity") + coord_flip()
+imp_plot + labs(y = "Importance for Predictive Accuracy (Logistic Regression)", x = "Variable")
+
+```
+
+
+Variable Relationships {data-navmenu="Model Insights"}
+=======================================================================
+
+Column
+-----------------------------------------------------------------------
+
+### Variable Relationships
+
+To further provide **actionable** information about ELVIS, we utilize **partial dependence plots** as a way to visualize the relationship between the values of our predictors and the expected risk of election-related violence. Partial dependence plots are similar in concept to the marginal effect. Essentially, these calculations can tell us the expected relationship between any one predictor variable and the expected classification of election-related violence while controlling for all other predictors simultaneously. For brief descriptions of each predictor, please see our [variable importance](#variable-importance) page. For a brief guide on interpretation, see the description below. 
+
+
+* **Partial Dependence Plots (Single Variable)**: 
+  - **X-Axis**: Name corresponds to the predictor variable of interest. Values along the x-axis correspond to real values of the predictor variable.
+  - **Y-Axis**: Values correspond to the expected classification of election-related violence based on a real value of the predictor variable. Higher values on the y-axis indicate greater expected classification of violence, while lower values indicate greater expected classification of peace.
+  
+\ <!-- \ This is a space, do not remove -->
+  
+* **Partial Dependence Plots (Multi-Variable)**:
+  - **X-Axis**: Name corresponds to the first predictor variable of interest. Values along the x-axis correspond to real values of the predictor variable.
+  - **Y-Axis**: Name corresponds to the second predictor variable of interest. Values along the x-axis correspond to real values of the predictor variable.
+  - **Z-Axis**: Values correspond to the expected classification of election-related violence based on a real value of the predictor variable. Higher values on the y-axis indicate greater expected classification of violence, while lower values indicate greater expected classification of peace.
+  - **Note on Color**: The multi-variable plot displays a 3D representation of the expected classification based on the values of two interacting predictors. The more blue/purple the color, the more likely our models is expected to classify peace. In contrast, the more green/yellow the color, the more likely our model is expected to classify election-related violence.
+  
+Column {data-width=1050 .tabset .tabset-fade}
+-----------------------------------------------------------------------
+
+### Partial Dependence Plots (Single Variable)
+
+```{R fig.height = 8}
+#dynamically produce pdp pictures based on user selection
+images <- c("partial_dependence_plots1.png","process1.png", "pcgdp.png", "lpop2.png", "lpolity2.png", "lpolcomp.png", "logIMF.png",          "lexconst.png","lastelection.png", "regimetenure.png", "spi.png")
+
+images <- setNames(images, c("All Predictors", "History of Election Violence", "GDP Per Capita", "Population (Logged)", "Quality of Democracy",
+                             "Political Competition", "Infant Mortality Rate (Logged)", "Executive Constraints", "Time Since Last Election",
+                             "Regime Tenure (Months)", "Relative Precipitation (SPI)"))
+
+
+test <- bsselect(images, type = "img", frame_height = "90%", frame_width = "85%", live_search = TRUE,
+         show_tick = TRUE, selected = "All Predictors")
+
+test
+
+
+
+
+```
+
+### Partial Dependence Plots (Multi Variable)
+
+```{R fig.height = 8}
+#dynamically produce pdp pictures based on user selection
+images2 <- c("test_plot.png", "test_plot2.png", "test_plot3.png")
+
+images2 <- setNames(images2, c("History of Election Violence X GDP Per Capita", "History of Election Violence X Infant Mortality Rate", "History of Election Violence X Quality of Democracy"))
+
+
+test2 <- bsselect(images2, type = "img", frame_height = "90%", frame_width = "85%", live_search = TRUE,
+         show_tick = TRUE, selected = "History of Election Violence X GDP Per Capita", title = "test")
+
+test2
+
+
+```
+
+
+
